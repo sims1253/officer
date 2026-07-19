@@ -343,25 +343,19 @@ sanitize_images <- function(x, warn_user = TRUE) {
     all_docs <- append(x$headers, x$footers)
     all_docs[[length(all_docs) + 1]] <- x$doc_obj
     all_docs[[length(all_docs) + 1]] <- x$footnotes
+    all_docs[[length(all_docs) + 1]] <- x$comments
 
     for (doc_part in all_docs) {
-      suppressWarnings({
-        blip_nodes <- xml_find_all(
-          doc_part$get(),
-          "//a:blip[contains(@r:embed, 'rId')]|//asvg:svgBlip[contains(@r:embed, 'rId')]",
-          ns = c(
-            "a" = "http://schemas.openxmlformats.org/drawingml/2006/main",
-            "asvg" = "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
-            "r" = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-          )
-        )
-      })
+      rid_attrs <- xml_find_all(
+        doc_part$get(),
+        "//@*[namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/relationships']"
+      )
+      rid_list <- unique(xml_text(rid_attrs))
 
-      embed_list <- xml_attr(blip_nodes, "embed")
       embed_data <- filter(
         .data = doc_part$rel_df(),
         basename(.data$type) %in% "image",
-        .data$id %in% embed_list
+        .data$id %in% rid_list
       )
       embed_data <- embed_data$target
       image_files[[length(image_files) + 1]] <- embed_data
@@ -390,6 +384,7 @@ sanitize_images <- function(x, warn_user = TRUE) {
       rel <- doc_part$relationship()
       rel_data <- rel$get_data()
       rel_data <- rel_data[basename(rel_data$type) %in% "image", ]
+      rel_data <- rel_data[!rel_data$target_mode %in% "External", ]
       rel_data <- rel_data[!file.exists(file.path(base_doc, rel_data$target)), ]
       if (nrow(rel_data) > 0) {
         rel$remove(rel_data$target)

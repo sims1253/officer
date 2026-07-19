@@ -1,3 +1,11 @@
+# officer 0.7.7
+
+## Issues
+
+- images referenced through VML (`v:imagedata`, e.g. EMF previews of embedded
+OLE objects), linked images (`a:blip/@r:link`) and images referenced only
+from comments are no longer dropped when a Word document is saved (#730).
+
 # officer 0.7.6
 
 ## Issues
