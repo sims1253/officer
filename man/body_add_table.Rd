@@ -13,6 +13,7 @@ body_add_table(
   alignment = NULL,
   align_table = "center",
   stylenames = table_stylenames(),
+  merge_consecutive = NULL,
   first_row = TRUE,
   first_column = FALSE,
   last_row = FALSE,
@@ -31,7 +32,8 @@ body_add_table(
 \item{pos}{where to add the new element relative to the cursor,
 one of after", "before", "on".}
 
-\item{header}{display header if TRUE}
+\item{header}{display header if TRUE, or a \code{\link[=table_header]{table_header()}} object for a
+grouped (multi-row, merged) header.}
 
 \item{alignment}{columns alignement, argument length must match with columns length,
 values must be "l" (left), "r" (right) or "c" (center).}
@@ -39,6 +41,9 @@ values must be "l" (left), "r" (right) or "c" (center).}
 \item{align_table}{table alignment within document, value must be "left", "center" or "right"}
 
 \item{stylenames}{columns styles defined by \code{\link[=table_stylenames]{table_stylenames()}}}
+
+\item{merge_consecutive}{optional character vector of column names whose
+consecutive identical values are vertically merged in the body.}
 
 \item{first_row}{Specifies that the first column conditional formatting should be
 applied. Details for this and other conditional formatting options can be found

@@ -4,12 +4,20 @@
 \alias{block_table}
 \title{Table block}
 \usage{
-block_table(x, header = TRUE, properties = prop_table(), alignment = NULL)
+block_table(
+  x,
+  header = TRUE,
+  properties = prop_table(),
+  alignment = NULL,
+  merge_consecutive = NULL
+)
 }
 \arguments{
 \item{x}{a data.frame to add as a table}
 
-\item{header}{display header if TRUE}
+\item{header}{logical or a \code{\link[=table_header]{table_header()}} object. \code{TRUE} (default) renders a
+single header row from the column names; \code{FALSE} renders none; a
+\code{\link[=table_header]{table_header()}} object renders a grouped (multi-row, merged) header.}
 
 \item{properties}{table properties, see \code{\link[=prop_table]{prop_table()}}.
 Table properties are not handled identically between Word and PowerPoint
@@ -19,6 +27,9 @@ formatting properties are supported.}
 
 \item{alignment}{alignment for each columns, 'l' for left, 'r' for right
 and 'c' for center. Default to NULL.}
+
+\item{merge_consecutive}{optional character vector of column names whose
+consecutive identical values are vertically merged (\code{w:vMerge}) in the body.}
 }
 \description{
 Create a representation of a table
@@ -31,9 +42,17 @@ block_table(x = mtcars, header = TRUE,
     tcf = table_conditional_formatting(
       first_row = TRUE, first_column = TRUE)
   ))
+
+# grouped header (merged header cells) + vertically merged body cells
+df <- data.frame(g = c("A", "A", "B"), x = c(1, 2, 3), y = c(4, 5, 6))
+block_table(
+  x = df,
+  header = table_header(list(Group = c("g" = "g"), Values = c("x" = "x", "y" = "y"))),
+  merge_consecutive = "g"
+)
 }
 \seealso{
-\code{\link[=prop_table]{prop_table()}}
+\code{\link[=prop_table]{prop_table()}}, \code{\link[=table_header]{table_header()}}
 
 Other block functions for reporting:
 \code{\link[=block_caption]{block_caption()}},

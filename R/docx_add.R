@@ -492,11 +492,14 @@ body_add_fpar <- function(x, value, style = NULL, pos = "after") {
 #' @param style table style
 #' @param pos where to add the new element relative to the cursor,
 #' one of after", "before", "on".
-#' @param header display header if TRUE
+#' @param header display header if TRUE, or a [table_header()] object for a
+#' grouped (multi-row, merged) header.
 #' @param alignment columns alignement, argument length must match with columns length,
 #' values must be "l" (left), "r" (right) or "c" (center).
 #' @param align_table table alignment within document, value must be "left", "center" or "right"
 #' @param stylenames columns styles defined by [table_stylenames()]
+#' @param merge_consecutive optional character vector of column names whose
+#' consecutive identical values are vertically merged in the body.
 #' @param first_row Specifies that the first column conditional formatting should be
 #' applied. Details for this and other conditional formatting options can be found
 #' at http://officeopenxml.com/WPtblLook.php.
@@ -522,6 +525,7 @@ body_add_table <- function(
   alignment = NULL,
   align_table = "center",
   stylenames = table_stylenames(),
+  merge_consecutive = NULL,
   first_row = TRUE,
   first_column = FALSE,
   last_row = FALSE,
@@ -549,7 +553,8 @@ body_add_table <- function(
     x = value,
     header = header,
     properties = pt,
-    alignment = alignment
+    alignment = alignment,
+    merge_consecutive = merge_consecutive
   )
   xml_elt <- to_wml(bt, add_ns = TRUE, base_document = x)
   body_add_xml(x = x, str = xml_elt, pos = pos)

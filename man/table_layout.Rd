@@ -24,6 +24,7 @@ Other functions for table definition:
 \code{\link[=prop_table]{prop_table()}},
 \code{\link[=table_colwidths]{table_colwidths()}},
 \code{\link[=table_conditional_formatting]{table_conditional_formatting()}},
+\code{\link[=table_header]{table_header()}},
 \code{\link[=table_stylenames]{table_stylenames()}},
 \code{\link[=table_width]{table_width()}}
 }

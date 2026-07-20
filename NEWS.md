@@ -1,5 +1,18 @@
 # officer 0.7.7
 
+## New features
+
+- `block_table()` and `body_add_table()` now support grouped (multi-row, merged)
+headers via the new `table_header()` helper (passed to the `header` argument
+in place of `TRUE`), rendered with `w:gridSpan`. This makes it possible to build
+tables that inherit the document's native table style **and** have a header
+with merged cells (e.g. a top banner grouping several columns), which
+`flextable` cannot do because it does not reference document styles.
+
+- `block_table()` and `body_add_table()` gain a `merge_consecutive` argument:
+a character vector of column names whose consecutive identical values are
+vertically merged (`w:vMerge`) in the table body.
+
 ## Issues
 
 - images referenced through VML (`v:imagedata`, e.g. EMF previews of embedded

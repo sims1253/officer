@@ -475,6 +475,70 @@ table_colwidths <- function(widths = NULL) {
 }
 
 #' @export
+#' @title Grouped (multi-row) table header
+#' @description Define a header made of one or more rows, where top rows group
+#' several columns under a single label (rendered with `w:gridSpan`). Pass the
+#' result to [block_table()] / [body_add_table()] via their `header` argument
+#' (in place of `TRUE`).
+#'
+#' `groups` is a named list. Each name is a group label displayed in the top
+#' header row, spanning the columns listed in its value. The values are column
+#' names of the data.frame (in the same order as the columns); if an element is
+#' named, that name is used as the displayed leaf label instead of the column
+#' name.
+#' @param groups a named list. Names = group labels; values = character vectors
+#' of column names belonging to the group, in column order.
+#' @return an object of class `table_header`.
+#' @examples
+#' # group "Treatment" spans columns `treatment` and `dose`,
+#' # group "Efficacy" spans `n`, `resp`, `orr`.
+#' table_header(list(
+#'   Treatment = c("Agent" = "treatment", "Dose" = "dose"),
+#'   Efficacy = c("n" = "n", "Responder" = "resp", "ORR" = "orr")
+#' ))
+#' @family functions for table definition
+table_header <- function(groups = list()) {
+  if (!is.list(groups)) {
+    stop("groups must be a named list")
+  }
+  if (length(groups) > 0 && (is.null(names(groups)) || any(names(groups) == ""))) {
+    stop("each group must be named; the name is the group label")
+  }
+  flat <- unlist(groups, use.names = FALSE)
+  if (anyDuplicated(flat)) {
+    stop("a column appears in more than one group: ",
+         paste(flat[duplicated(flat)], collapse = ", "))
+  }
+  z <- list(groups = groups)
+  class(z) <- "table_header"
+  z
+}
+
+# internal: expand a table_header against the data.frame columns.
+# returns list(flat = ordered column names, leaf = leaf labels, groups = groups).
+# Validates that the flattened columns match the data.frame columns, in order.
+flatten_table_header <- function(th, cols) {
+  groups <- th$groups
+  flat <- as.character(unlist(groups, use.names = FALSE))
+  if (!identical(flat, as.character(cols))) {
+    stop(
+      "table_header columns (", paste(flat, collapse = ", "),
+      ") must match the data.frame columns, in the same order (",
+      paste(cols, collapse = ", "), ")."
+    )
+  }
+  leaf <- character(length(flat))
+  k <- 0
+  for (g in names(groups)) {
+    v <- groups[[g]]
+    labs <- if (!is.null(names(v))) names(v) else v
+    leaf[k + seq_along(v)] <- as.character(labs)
+    k <- k + length(v)
+  }
+  list(flat = flat, leaf = leaf, groups = groups)
+}
+
+#' @export
 #' @title Paragraph styles for columns
 #' @description The function defines the paragraph styles for columns.
 #' @param stylenames a named character vector, names are column names, values are
@@ -658,7 +722,8 @@ table_docx <- function(
   properties,
   alignment = NULL,
   add_ns = FALSE,
-  base_document = base_document
+  base_document = base_document,
+  merge_consecutive = NULL
 ) {
   open_tag <- tbl_ns_no
   if (add_ns) {
@@ -692,33 +757,112 @@ table_docx <- function(
     alignment <- sprintf("<w:jc w:val=\"%s\"/>", alignment)
   }
 
+  cols <- colnames(x)
+
   header_str <- character(length = 0L)
-  if (header) {
+  if (isTRUE(header)) {
+    # single header row from column names (original behaviour)
     header_str <- paste0(
       "<w:tr><w:trPr><w:tblHeader/></w:trPr>",
       paste0(
         "<w:tc><w:p>",
         sprintf("<w:pPr>%s%s</w:pPr>", stylenames, alignment),
         "<w:r><w:t>",
-        htmlEscapeCopy(enc2utf8(colnames(x))),
+        htmlEscapeCopy(enc2utf8(cols)),
         "</w:t></w:r></w:p></w:tc>",
         collapse = ""
       ),
       "</w:tr>"
     )
-  }
-  as_tc <- function(x, align, stylenames) {
-    paste0(
-      "<w:tc><w:p>",
-      sprintf("<w:pPr>%s%s</w:pPr>", stylenames, align),
-      "<w:r><w:t>",
-      htmlEscapeCopy(enc2utf8(x)),
-      "</w:t></w:r></w:p></w:tc>"
+  } else if (inherits(header, "table_header")) {
+    spec <- flatten_table_header(header, cols)
+    # group row: one cell per group, spanning its columns (w:gridSpan)
+    group_cells <- vapply(
+      seq_along(spec$groups),
+      function(k) {
+        gcols <- spec$groups[[k]]
+        first_pos <- match(gcols[1], spec$flat)
+        span <- length(gcols)
+        tcpr <- if (span > 1L)
+          sprintf("<w:tcPr><w:gridSpan w:val=\"%d\"/></w:tcPr>", span) else ""
+        paste0(
+          "<w:tc>", tcpr, "<w:p>",
+          sprintf("<w:pPr>%s%s</w:pPr>", stylenames[first_pos], alignment[first_pos]),
+          "<w:r><w:t>", htmlEscapeCopy(enc2utf8(names(spec$groups)[k])),
+          "</w:t></w:r></w:p></w:tc>"
+        )
+      },
+      character(1)
     )
+    group_row <- paste0(
+      "<w:tr><w:trPr><w:tblHeader/></w:trPr>",
+      paste0(group_cells, collapse = ""), "</w:tr>"
+    )
+    # leaf row: one cell per column
+    leaf_cells <- paste0(
+      "<w:tc><w:p>",
+      sprintf("<w:pPr>%s%s</w:pPr>", stylenames, alignment),
+      "<w:r><w:t>",
+      htmlEscapeCopy(enc2utf8(spec$leaf)),
+      "</w:t></w:r></w:p></w:tc>",
+      collapse = ""
+    )
+    leaf_row <- paste0(
+      "<w:tr><w:trPr><w:tblHeader/></w:trPr>", leaf_cells, "</w:tr>"
+    )
+    header_str <- paste0(group_row, leaf_row)
   }
-  z <- mapply(as_tc, x, alignment, stylenames, SIMPLIFY = FALSE)
-  z <- do.call(paste0, z)
-  z <- paste0("<w:tr>", z, "</w:tr>", collapse = "")
+  merge_consecutive <- intersect(merge_consecutive, cols)
+  if (length(merge_consecutive) < 1L) {
+    # original vectorised path (unchanged output)
+    as_tc <- function(x, align, stylenames) {
+      paste0(
+        "<w:tc><w:p>",
+        sprintf("<w:pPr>%s%s</w:pPr>", stylenames, align),
+        "<w:r><w:t>",
+        htmlEscapeCopy(enc2utf8(x)),
+        "</w:t></w:r></w:p></w:tc>"
+      )
+    }
+    z <- mapply(as_tc, x, alignment, stylenames, SIMPLIFY = FALSE)
+    z <- do.call(paste0, z)
+    z <- paste0("<w:tr>", z, "</w:tr>", collapse = "")
+  } else {
+    # row-wise path so consecutive identical values can be vMerged
+    nr <- nrow(x)
+    rows <- character(nr)
+    for (i in seq_len(nr)) {
+      cells <- character(length(cols))
+      for (j in seq_along(cols)) {
+        cn <- cols[j]
+        vm <- "none"
+        if (cn %in% merge_consecutive) {
+          if (i == 1L) {
+            vm <- "restart"
+          } else {
+            cur <- x[[cn]][i]; prev <- x[[cn]][i - 1L]
+            vm <- if (!is.na(cur) && !is.na(prev) && identical(cur, prev))
+              "continue" else "restart"
+          }
+        }
+        tcpr <- switch(vm,
+          restart  = "<w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>",
+          continue = "<w:tcPr><w:vMerge/></w:tcPr>",
+          "")
+        ppr <- sprintf("<w:pPr>%s%s</w:pPr>", stylenames[j], alignment[j])
+        if (vm == "continue") {
+          cells[j] <- paste0("<w:tc>", tcpr, "<w:p>", ppr, "</w:p></w:tc>")
+        } else {
+          cells[j] <- paste0(
+            "<w:tc>", tcpr, "<w:p>", ppr,
+            "<w:r><w:t>", htmlEscapeCopy(enc2utf8(x[[cn]][i])), "</w:t></w:r></w:p></w:tc>"
+          )
+        }
+      }
+      rows[i] <- paste0("<w:tr>", paste0(cells, collapse = ""), "</w:tr>")
+    }
+    z <- paste0(rows, collapse = "")
+  }
 
   paste0(str, header_str, z, "</w:tbl>")
 }
@@ -802,8 +946,13 @@ table_pptx <- function(
 #' output format. They are fully supported with Word but for PowerPoint (which
 #' does not handle as many things as Word for tables), only conditional
 #' formatting properties are supported.
+#' @param header logical or a [table_header()] object. `TRUE` (default) renders a
+#' single header row from the column names; `FALSE` renders none; a
+#' [table_header()] object renders a grouped (multi-row, merged) header.
 #' @param alignment alignment for each columns, 'l' for left, 'r' for right
 #' and 'c' for center. Default to NULL.
+#' @param merge_consecutive optional character vector of column names whose
+#' consecutive identical values are vertically merged (`w:vMerge`) in the body.
 #' @examples
 #' block_table(x = head(iris))
 #'
@@ -812,13 +961,22 @@ table_pptx <- function(
 #'     tcf = table_conditional_formatting(
 #'       first_row = TRUE, first_column = TRUE)
 #'   ))
+#'
+#' # grouped header (merged header cells) + vertically merged body cells
+#' df <- data.frame(g = c("A", "A", "B"), x = c(1, 2, 3), y = c(4, 5, 6))
+#' block_table(
+#'   x = df,
+#'   header = table_header(list(Group = c("g" = "g"), Values = c("x" = "x", "y" = "y"))),
+#'   merge_consecutive = "g"
+#' )
 #' @family block functions for reporting
-#' @seealso [prop_table()]
+#' @seealso [prop_table()], [table_header()]
 block_table <- function(
   x,
   header = TRUE,
   properties = prop_table(),
-  alignment = NULL
+  alignment = NULL,
+  merge_consecutive = NULL
 ) {
   stopifnot(is.data.frame(x))
   if (inherits(x, "tbl_df")) {
@@ -829,11 +987,16 @@ block_table <- function(
     )
   }
 
+  if (!is.logical(header) && !inherits(header, "table_header")) {
+    stop("header must be TRUE, FALSE, or a table_header() object")
+  }
+
   z <- list(
     x = x,
     header = header,
     properties = properties,
-    alignment = alignment
+    alignment = alignment,
+    merge_consecutive = as.character(merge_consecutive)
   )
   class(z) <- c("block_table", "block")
 
@@ -856,7 +1019,8 @@ to_wml.block_table <- function(x, add_ns = FALSE, base_document = NULL, ...) {
     properties = x$properties,
     alignment = x$alignment,
     base_document = base_document,
-    add_ns = add_ns
+    add_ns = add_ns,
+    merge_consecutive = x$merge_consecutive
   )
 
   out

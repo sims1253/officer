@@ -16,6 +16,7 @@ The function defines the size of each column of a table.
 Other functions for table definition:
 \code{\link[=prop_table]{prop_table()}},
 \code{\link[=table_conditional_formatting]{table_conditional_formatting()}},
+\code{\link[=table_header]{table_header()}},
 \code{\link[=table_layout]{table_layout()}},
 \code{\link[=table_stylenames]{table_stylenames()}},
 \code{\link[=table_width]{table_width()}}
