@@ -357,17 +357,75 @@ sanitize_images <- function(x, warn_user = TRUE) {
         basename(.data$type) %in% "image",
         .data$id %in% rid_list
       )
-      embed_data <- embed_data$target
+      # OPC relationship targets are URI-encoded (e.g. "my%20image.gif"),
+      # so decode them before they are compared against the real on-disk
+      # file names gathered in existing_img (which are not encoded).
+      embed_data <- .url_percent_decode(embed_data$target)
       image_files[[length(image_files) + 1]] <- embed_data
     }
 
     image_files <- do.call(c, image_files)
     image_files <- unique(image_files)
 
+    # Union in the image targets of every UNMANAGED .rels file in the
+    # package. Officer never edits parts such as endnotes.xml, charts/*,
+    # diagrams/* (SmartArt) or glossary/*, so their relationship files are
+    # the authoritative list of what they reference (this mirrors what the
+    # rpptx branch already does globally). Without this, media referenced
+    # only from such a part would be deleted on save while the part's
+    # (verbatim, never rewritten) .rels still points at it -> corrupt docx.
+    managed_parts <- c(
+      "document.xml", names(x$headers), names(x$footers),
+      "footnotes.xml", "comments.xml"
+    )
+    managed_rels <- file.path(
+      x$package_dir, "word", "_rels", paste0(managed_parts, ".rels")
+    )
+    all_rels <- list.files(
+      x$package_dir, pattern = "\\.rels$",
+      recursive = TRUE, full.names = TRUE, all.files = TRUE
+    )
+    unmanaged_rels <- setdiff(
+      normalizePath(all_rels, winslash = "/", mustWork = FALSE),
+      normalizePath(managed_rels, winslash = "/", mustWork = FALSE)
+    )
+
     base_doc <- file.path(x$package_dir, "word")
+    base_norm <- normalizePath(base_doc, winslash = "/", mustWork = FALSE)
+    for (rf in unmanaged_rels) {
+      zz <- read_xml(rf)
+      rels <- xml_children(zz)
+      rels <- rels[
+        xml_attr(rels, "Type") %in%
+          "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" &
+          !xml_attr(rels, "TargetMode") %in% "External"
+      ]
+      targets <- xml_attr(rels, "Target")
+      targets <- .url_percent_decode(targets)
+      if (length(targets) == 0L) {
+        next
+      }
+      part_dir <- dirname(dirname(rf)) # the dir owning this _rels folder
+      resolved <- ifelse(
+        startsWith(targets, "/"),
+        file.path(x$package_dir, sub("^/", "", targets)),
+        file.path(part_dir, targets)
+      )
+      resolved <- normalizePath(resolved, winslash = "/", mustWork = FALSE)
+      # keep only paths under word/, expressed relative to word/ like the
+      # entries already in image_files (e.g. "media/image1.emf")
+      under <- !is.na(resolved) &
+        startsWith(resolved, paste0(base_norm, "/"))
+      image_files <- c(
+        image_files,
+        substring(resolved[under], nchar(base_norm) + 2L)
+      )
+    }
+    image_files <- unique(image_files)
+
     existing_img <- list.files(
       file.path(base_doc, "media"),
-      pattern = "\\.(png|jpg|jpeg|eps|emf|svg)$",
+      pattern = "\\.(png|jpg|jpeg|gif|bmp|tif|tiff|wmf|eps|emf|svg)$",
       ignore.case = TRUE,
       recursive = TRUE,
       full.names = TRUE
@@ -385,7 +443,12 @@ sanitize_images <- function(x, warn_user = TRUE) {
       rel_data <- rel$get_data()
       rel_data <- rel_data[basename(rel_data$type) %in% "image", ]
       rel_data <- rel_data[!rel_data$target_mode %in% "External", ]
-      rel_data <- rel_data[!file.exists(file.path(base_doc, rel_data$target)), ]
+      # The file-exists test must use the DECODED target (OPC targets are
+      # URI-encoded), but rel$remove() below still receives the ORIGINAL
+      # stored target strings because removal matches by stored string.
+      rel_data <- rel_data[
+        !file.exists(file.path(base_doc, .url_percent_decode(rel_data$target))),
+      ]
       if (nrow(rel_data) > 0) {
         rel$remove(rel_data$target)
         doc_part$save()
@@ -399,34 +462,51 @@ sanitize_images <- function(x, warn_user = TRUE) {
       full.names = TRUE
     )
 
-    image_files <- lapply(rel_files, function(x) {
-      zz <- read_xml(x)
+    # Collect every image relationship target as a CANONICAL ABSOLUTE path,
+    # mirroring the docx unmanaged-rels loop above. pptx has no
+    # managed/unmanaged split, so anything referenced from ANY .rels stays.
+    # Resolving to absolute paths (and decoding percent-escapes first) makes
+    # the comparison robust to the target forms actually found in packages:
+    # "../media/image.gif", "media/image.gif" (parts directly under ppt/),
+    # "../../media/image.gif" (nested subdirs), "/ppt/media/image.gif"
+    # (package-absolute) and URI-encoded names ("my%20image.gif").
+    image_files <- c()
+    for (rf in rel_files) {
+      zz <- read_xml(rf)
       rels <- xml_children(zz)
       rels <- rels[
         xml_attr(rels, "Type") %in%
-          "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+          "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" &
+          !xml_attr(rels, "TargetMode") %in% "External"
       ]
-      xml_attr(rels, "Target")
-    })
-    image_files <- unique(unlist(image_files))
+      targets <- xml_attr(rels, "Target")
+      targets <- .url_percent_decode(targets)
+      if (length(targets) == 0L) {
+        next
+      }
+      part_dir <- dirname(dirname(rf)) # the dir owning this _rels folder
+      resolved <- ifelse(
+        startsWith(targets, "/"),
+        file.path(x$package_dir, sub("^/", "", targets)),
+        file.path(part_dir, targets)
+      )
+      resolved <- normalizePath(resolved, winslash = "/", mustWork = FALSE)
+      image_files <- c(image_files, resolved)
+    }
+    image_files <- unique(image_files)
+
     base_doc <- file.path(x$package_dir, "ppt")
     existing_img <- list.files(
       file.path(base_doc, "media"),
-      pattern = "\\.(png|jpg|jpeg|eps|emf|svg)$",
+      pattern = "\\.(png|jpg|jpeg|gif|bmp|tif|tiff|wmf|eps|emf|svg)$",
       ignore.case = TRUE,
       recursive = TRUE,
       full.names = TRUE
     )
-    existing_img <- gsub(
-      paste0(base_doc, "/"),
-      "../",
-      existing_img,
-      fixed = TRUE
-    )
-    unlink(
-      file.path(base_doc, setdiff(existing_img, image_files)),
-      force = TRUE
-    )
+    existing_img <- normalizePath(existing_img, winslash = "/", mustWork = FALSE)
+    # unlink the set difference (absolute paths): media under ppt/media
+    # matching the glob that no .rels references.
+    unlink(setdiff(existing_img, image_files), force = TRUE)
   }
   x
 }

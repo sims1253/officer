@@ -1083,3 +1083,154 @@ test_that("images referenced only from comments survive a roundtrip", {
   # the twice-saved file must still be readable
   expect_no_error(read_docx(out2))
 })
+
+# media referenced only from unmanaged parts (issue #730, round 3) -----------
+
+# Build a docx whose only references to word/media/image9.jpg and
+# word/media/my image10.gif come from parts officer does not manage and never
+# rewrites: word/endnotes.xml (target "media/image9.jpg") and
+# word/diagrams/data1.xml (target "../media/my%20image10.gif" — a URI-encoded
+# space). sanitize_images()
+# used to delete such media on save while the part's verbatim .rels still
+# referenced it, corrupting the file.
+build_unmanaged_media_docx <- function() {
+  base <- tempfile(fileext = ".docx")
+  print(read_docx(), target = base)
+  dir <- tempfile()
+  unzip(base, exdir = dir)
+
+  # --- endnotes part referencing media/image9.jpg -------------------------
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+    ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+    ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+    '<w:endnote w:id="1"><w:p><w:r><w:drawing>',
+    '<wp:inline distT="0" distB="0" distL="0" distR="0">',
+    '<wp:extent cx="914400" cy="914400"/><wp:docPr id="9" name="P"/>',
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+    '<pic:pic><pic:nvPicPr><pic:cNvPr id="9" name=""/><pic:cNvPicPr/></pic:nvPicPr>',
+    '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>',
+    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>',
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>',
+    '</pic:pic></a:graphicData></a:graphic></wp:inline>',
+    '</w:drawing></w:r></w:p></w:endnote></w:endnotes>'
+  ), file.path(dir, "word", "endnotes.xml"), useBytes = TRUE)
+
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image9.jpg"/>',
+    '</Relationships>'
+  ), file.path(dir, "word", "_rels", "endnotes.xml.rels"), useBytes = TRUE)
+
+  # --- diagrams part referencing ../media/my%20image10.gif (a URI-encoded
+  #     space; the on-disk file is "my image10.gif") ---------------------
+  dir.create(file.path(dir, "word", "diagrams", "_rels"),
+             recursive = TRUE, showWarnings = FALSE)
+  writeLines(
+    '<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>',
+    file.path(dir, "word", "diagrams", "data1.xml"), useBytes = TRUE
+  )
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/my%20image10.gif"/>',
+    '</Relationships>'
+  ), file.path(dir, "word", "diagrams", "_rels", "data1.xml.rels"),
+    useBytes = TRUE)
+
+  # --- media files --------------------------------------------------------
+  dir.create(file.path(dir, "word", "media"), showWarnings = FALSE)
+  file.copy(file.path(R.home("doc"), "html", "logo.jpg"),
+            file.path(dir, "word", "media", "image9.jpg"))
+  # the diagrams part references "my image10.gif" through the URI-encoded
+  # target "../media/my%20image10.gif". word/media content is not validated,
+  # so a small binary blob (a plausible GIF header) is enough; this also
+  # exercises the widened .gif glob and the officer_url_decode() path.
+  writeBin(
+    charToRaw("GIF89a"),
+    file.path(dir, "word", "media", "my image10.gif")
+  )
+
+  # --- register the new parts in document.xml.rels + [Content_Types].xml --
+  rels_f <- file.path(dir, "word", "_rels", "document.xml.rels")
+  rels <- readLines(rels_f, warn = FALSE)
+  rels <- sub("</Relationships>",
+    paste0(
+      '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>',
+      '<Relationship Id="rId100" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/>',
+      '</Relationships>'
+    ),
+    rels)
+  writeLines(rels, rels_f, useBytes = TRUE)
+
+  ct_f <- file.path(dir, "[Content_Types].xml")
+  ct <- readLines(ct_f, warn = FALSE)
+  if (!any(grepl('Extension="jpg"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="jpg" ContentType="image/jpeg"/><Override', ct)
+  }
+  if (!any(grepl('Extension="png"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="png" ContentType="image/png"/><Override', ct)
+  }
+  if (!any(grepl('Extension="gif"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="gif" ContentType="image/gif"/><Override', ct)
+  }
+  ct <- sub("</Types>",
+    paste0(
+      '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>',
+      '<Override PartName="/word/diagrams/data1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml"/>',
+      '</Types>'
+    ),
+    ct)
+  writeLines(ct, ct_f, useBytes = TRUE)
+
+  src <- tempfile(fileext = ".docx")
+  old_wd <- getwd()
+  setwd(dir)
+  on.exit(setwd(old_wd), add = TRUE)
+  zip::zip(
+    zipfile = src,
+    files = list.files(dir, all.files = TRUE, no.. = TRUE),
+    root = dir
+  )
+  src
+}
+
+test_that("media referenced only from unmanaged parts survives a roundtrip", {
+  # images referenced only from endnotes.xml (target "media/...") or from a
+  # subdirectory part like word/diagrams (target "../media/...") must not be
+  # deleted by sanitize_images(), which only scans the parts officer manages.
+  src <- build_unmanaged_media_docx()
+
+  out <- tempfile(fileext = ".docx")
+  print(read_docx(src), target = out)
+  dir_out <- tempfile()
+  unzip(out, exdir = dir_out)
+
+  # both media files must still be present
+  expect_true(file.exists(file.path(dir_out, "word", "media", "image9.jpg")))
+  expect_true(file.exists(file.path(dir_out, "word", "media", "my image10.gif")))
+
+  # both unmanaged .rels files must still reference them
+  endnotes_rels <- readLines(
+    file.path(dir_out, "word", "_rels", "endnotes.xml.rels"), warn = FALSE
+  )
+  expect_true(any(grepl("image9.jpg", endnotes_rels, fixed = TRUE)))
+
+  diagram_rels <- readLines(
+    file.path(dir_out, "word", "diagrams", "_rels", "data1.xml.rels"),
+    warn = FALSE
+  )
+  # the unmanaged rels file is copied verbatim, so the URI-encoded target is
+  # preserved as written.
+  expect_true(any(grepl("my%20image10.gif", diagram_rels, fixed = TRUE)))
+
+  # the saved file must still be readable
+  expect_no_error(read_docx(out))
+})
