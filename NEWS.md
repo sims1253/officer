@@ -1,3 +1,30 @@
+# officer 0.7.7
+
+## Issues
+
+- images referenced through VML (`v:imagedata`, e.g. EMF previews of embedded
+OLE objects), linked images (`a:blip/@r:link`) and images referenced only
+from comments are no longer dropped when a Word document is saved (#730).
+
+- media referenced only from document parts officer does not manage
+(endnotes, charts, SmartArt diagrams, glossary) is no longer deleted when a
+Word document is saved (#730).
+
+- saving a Word document no longer alters `settings.xml` semantics: an absent
+`evenAndOddHeaders` is not re-added (a double save used to switch even/odd
+headers ON), a `val="0"` element is read as `FALSE`, and existing `w:compat`
+entries are preserved instead of being replaced by a bare `compatibilityMode`
+(#730).
+
+- relationship targets are treated as URIs when checking which media files
+are in use: percent-encoded targets (e.g. `my%20image.gif`) no longer cause
+referenced media to be deleted or relationships to be pruned.
+
+- unused-media cleanup for PowerPoint files now works and is safe: the old
+code never actually deleted orphaned media (wrong path resolution), and the
+rewritten check resolves every relationship target (relative, absolute or
+percent-encoded, from any part directory) before deciding a file is unused.
+
 # officer 0.7.6
 
 ## Issues

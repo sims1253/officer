@@ -896,3 +896,341 @@ test_that("image_to_base64 with multiple non-existent files", {
     "File\\(s\\) not found"
   )
 })
+
+
+# VML imagedata roundtrip tests (issue #730) ----
+
+test_that("VML imagedata image relationships survive a roundtrip", {
+  # regression test for issue #730: the EMF preview of an embedded OLE object
+  # is referenced via v:imagedata/@r:id and must not be pruned on save
+  doc <- read_docx("docs_dir/ole-emf-preview.docx")
+  outfile <- tempfile(fileext = ".docx")
+  print(doc, target = outfile)
+
+  dir_out <- tempfile()
+  unzip(outfile, exdir = dir_out)
+
+  expect_true(file.exists(file.path(dir_out, "word", "media", "image1.emf")))
+
+  doc_xml <- read_xml(file.path(dir_out, "word", "document.xml"))
+  imagedata <- xml_find_first(
+    doc_xml, "//v:imagedata",
+    ns = c(v = "urn:schemas-microsoft-com:vml")
+  )
+  rid <- xml_attr(imagedata, "id")
+  expect_false(is.na(rid))
+
+  rels <- read_xml(file.path(dir_out, "word", "_rels", "document.xml.rels"))
+  rel_node <- xml_find_first(
+    rels, sprintf("//*[local-name()='Relationship'][@Id='%s']", rid)
+  )
+  expect_false(inherits(rel_node, "xml_missing"))
+  expect_equal(basename(xml_attr(rel_node, "Type")), "image")
+  expect_equal(xml_attr(rel_node, "Target"), "media/image1.emf")
+
+  # the roundtripped file must still be readable
+  expect_no_error(read_docx(outfile))
+})
+
+
+# external (linked) image relationship tests (issue #730 follow-up) ----
+
+test_that("external image relationships survive a save", {
+  # regression test for issue #730 follow-up: an image referenced through
+  # <a:blip r:link="rIdX"/> (TargetMode="External") must not be pruned by
+  # sanitize_images(), which used to delete any image relationship whose
+  # Target did not exist as a local file.
+  doc <- read_docx()
+  rel <- doc$doc_obj$relationship()
+  rid <- sprintf("rId%.0f", rel$get_next_id())
+  rel$add(
+    id = rid,
+    type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+    target = "https://www.example.com/logo.png",
+    target_mode = "External"
+  )
+
+  # minimal inline drawing whose blip references the relationship via r:link
+  # (instead of r:embed). Modeled on to_wml.external_img() in R/ooxml_run_objects.R.
+  drawing <- sprintf(
+    paste0(
+      '<w:p',
+      ' xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+      ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+      ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+      ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+      ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+      '<w:r><w:rPr/><w:drawing>',
+      '<wp:inline distT="0" distB="0" distL="0" distR="0">',
+      '<wp:extent cx="1905000" cy="1905000"/>',
+      '<wp:docPr id="1" name="Picture 1" descr=""/>',
+      '<wp:cNvGraphicFramePr>',
+      '<a:graphicFrameLocks noChangeAspect="1"/>',
+      '</wp:cNvGraphicFramePr>',
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+      '<pic:pic>',
+      '<pic:nvPicPr>',
+      '<pic:cNvPr id="1" name=""/>',
+      '<pic:cNvPicPr><a:picLocks noChangeAspect="1" noChangeArrowheads="1"/></pic:cNvPicPr>',
+      '</pic:nvPicPr>',
+      '<pic:blipFill>',
+      '<a:blip r:link="%s"/>',
+      '<a:stretch><a:fillRect/></a:stretch>',
+      '</pic:blipFill>',
+      '<pic:spPr bwMode="auto"><a:xfrm><a:off x="0" y="0"/>',
+      '<a:ext cx="1905000" cy="1905000"/></a:xfrm>',
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></pic:spPr>',
+      '</pic:pic></a:graphicData></a:graphic>',
+      '</wp:inline></w:drawing></w:r></w:p>'
+    ),
+    rid
+  )
+  doc <- body_add_xml(doc, drawing)
+
+  outfile <- tempfile(fileext = ".docx")
+  print(doc, target = outfile)
+
+  dir_out <- tempfile()
+  unzip(outfile, exdir = dir_out)
+
+  # word/document.xml must still carry the r:link attribute referencing rid
+  doc_xml <- read_xml(file.path(dir_out, "word", "document.xml"))
+  blip <- xml_find_first(
+    doc_xml,
+    sprintf("//a:blip[@r:link='%s']", rid),
+    ns = c(
+      a = "http://schemas.openxmlformats.org/drawingml/2006/main",
+      r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    )
+  )
+  expect_false(inherits(blip, "xml_missing"))
+
+  # document.xml.rels must still have Id=rid with TargetMode="External"
+  rels <- read_xml(file.path(dir_out, "word", "_rels", "document.xml.rels"))
+  rel_node <- xml_find_first(
+    rels, sprintf("//*[local-name()='Relationship'][@Id='%s']", rid)
+  )
+  expect_false(inherits(rel_node, "xml_missing"))
+  expect_equal(basename(xml_attr(rel_node, "Type")), "image")
+  expect_equal(xml_attr(rel_node, "Target"), "https://www.example.com/logo.png")
+  expect_equal(xml_attr(rel_node, "TargetMode"), "External")
+
+  # the saved file must still be readable
+  expect_no_error(read_docx(outfile))
+})
+
+test_that("images referenced only from comments survive a roundtrip", {
+  # regression test for issue #730: an image that is referenced only from
+  # comments.xml (not from the document body) must survive repeated saves.
+  img.file <- file.path(R.home("doc"), "html", "logo.jpg")
+
+  doc <- read_docx()
+  commented_par <- fpar(
+    run_comment(
+      cmt = block_list(fpar(external_img(img.file))),
+      run = ftext("commented run"),
+      author = "Author Me",
+      date = "2023-06-01"
+    )
+  )
+  doc <- body_add_fpar(doc, value = commented_par, style = "Normal")
+
+  out1 <- tempfile(fileext = ".docx")
+  print(doc, target = out1)
+
+  # roundtrip a second time: this is where the old code dropped the media
+  doc2 <- read_docx(out1)
+  out2 <- tempfile(fileext = ".docx")
+  print(doc2, target = out2)
+
+  dir_out <- tempfile()
+  unzip(out2, exdir = dir_out)
+
+  # a media file must still exist under word/media
+  media_files <- list.files(
+    file.path(dir_out, "word", "media"),
+    pattern = "\\.(png|jpg|jpeg)$",
+    ignore.case = TRUE,
+    full.names = TRUE
+  )
+  expect_true(length(media_files) >= 1)
+
+  # comments.xml must still reference the image via a:blip/@r:embed
+  comments_xml <- read_xml(file.path(dir_out, "word", "comments.xml"))
+  embed_blip <- xml_find_first(
+    comments_xml,
+    "//a:blip[@r:embed]",
+    ns = c(
+      a = "http://schemas.openxmlformats.org/drawingml/2006/main",
+      r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    )
+  )
+  expect_false(inherits(embed_blip, "xml_missing"))
+  rid <- xml_attr(embed_blip, "embed")
+  expect_false(is.na(rid))
+
+  # word/_rels/comments.xml.rels must still carry the image relationship
+  comments_rels <- read_xml(
+    file.path(dir_out, "word", "_rels", "comments.xml.rels")
+  )
+  rel_node <- xml_find_first(
+    comments_rels,
+    sprintf("//*[local-name()='Relationship'][@Id='%s']", rid)
+  )
+  expect_false(inherits(rel_node, "xml_missing"))
+  expect_equal(basename(xml_attr(rel_node, "Type")), "image")
+
+  # the twice-saved file must still be readable
+  expect_no_error(read_docx(out2))
+})
+
+# media referenced only from unmanaged parts (issue #730, round 3) -----------
+
+# Build a docx whose only references to word/media/image9.jpg and
+# word/media/my image10.gif come from parts officer does not manage and never
+# rewrites: word/endnotes.xml (target "media/image9.jpg") and
+# word/diagrams/data1.xml (target "../media/my%20image10.gif" — a URI-encoded
+# space). sanitize_images()
+# used to delete such media on save while the part's verbatim .rels still
+# referenced it, corrupting the file.
+build_unmanaged_media_docx <- function() {
+  base <- tempfile(fileext = ".docx")
+  print(read_docx(), target = base)
+  dir <- tempfile()
+  unzip(base, exdir = dir)
+
+  # --- endnotes part referencing media/image9.jpg -------------------------
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+    ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+    ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+    '<w:endnote w:id="1"><w:p><w:r><w:drawing>',
+    '<wp:inline distT="0" distB="0" distL="0" distR="0">',
+    '<wp:extent cx="914400" cy="914400"/><wp:docPr id="9" name="P"/>',
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+    '<pic:pic><pic:nvPicPr><pic:cNvPr id="9" name=""/><pic:cNvPicPr/></pic:nvPicPr>',
+    '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>',
+    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>',
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>',
+    '</pic:pic></a:graphicData></a:graphic></wp:inline>',
+    '</w:drawing></w:r></w:p></w:endnote></w:endnotes>'
+  ), file.path(dir, "word", "endnotes.xml"), useBytes = TRUE)
+
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image9.jpg"/>',
+    '</Relationships>'
+  ), file.path(dir, "word", "_rels", "endnotes.xml.rels"), useBytes = TRUE)
+
+  # --- diagrams part referencing ../media/my%20image10.gif (a URI-encoded
+  #     space; the on-disk file is "my image10.gif") ---------------------
+  dir.create(file.path(dir, "word", "diagrams", "_rels"),
+             recursive = TRUE, showWarnings = FALSE)
+  writeLines(
+    '<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>',
+    file.path(dir, "word", "diagrams", "data1.xml"), useBytes = TRUE
+  )
+  writeLines(paste0(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/my%20image10.gif"/>',
+    '</Relationships>'
+  ), file.path(dir, "word", "diagrams", "_rels", "data1.xml.rels"),
+    useBytes = TRUE)
+
+  # --- media files --------------------------------------------------------
+  dir.create(file.path(dir, "word", "media"), showWarnings = FALSE)
+  file.copy(file.path(R.home("doc"), "html", "logo.jpg"),
+            file.path(dir, "word", "media", "image9.jpg"))
+  # the diagrams part references "my image10.gif" through the URI-encoded
+  # target "../media/my%20image10.gif". word/media content is not validated,
+  # so a small binary blob (a plausible GIF header) is enough; this also
+  # exercises the widened .gif glob and the officer_url_decode() path.
+  writeBin(
+    charToRaw("GIF89a"),
+    file.path(dir, "word", "media", "my image10.gif")
+  )
+
+  # --- register the new parts in document.xml.rels + [Content_Types].xml --
+  rels_f <- file.path(dir, "word", "_rels", "document.xml.rels")
+  rels <- readLines(rels_f, warn = FALSE)
+  rels <- sub("</Relationships>",
+    paste0(
+      '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>',
+      '<Relationship Id="rId100" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/>',
+      '</Relationships>'
+    ),
+    rels)
+  writeLines(rels, rels_f, useBytes = TRUE)
+
+  ct_f <- file.path(dir, "[Content_Types].xml")
+  ct <- readLines(ct_f, warn = FALSE)
+  if (!any(grepl('Extension="jpg"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="jpg" ContentType="image/jpeg"/><Override', ct)
+  }
+  if (!any(grepl('Extension="png"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="png" ContentType="image/png"/><Override', ct)
+  }
+  if (!any(grepl('Extension="gif"', ct))) {
+    ct <- sub("<Override",
+      '<Default Extension="gif" ContentType="image/gif"/><Override', ct)
+  }
+  ct <- sub("</Types>",
+    paste0(
+      '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>',
+      '<Override PartName="/word/diagrams/data1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml"/>',
+      '</Types>'
+    ),
+    ct)
+  writeLines(ct, ct_f, useBytes = TRUE)
+
+  src <- tempfile(fileext = ".docx")
+  old_wd <- getwd()
+  setwd(dir)
+  on.exit(setwd(old_wd), add = TRUE)
+  zip::zip(
+    zipfile = src,
+    files = list.files(dir, all.files = TRUE, no.. = TRUE),
+    root = dir
+  )
+  src
+}
+
+test_that("media referenced only from unmanaged parts survives a roundtrip", {
+  # images referenced only from endnotes.xml (target "media/...") or from a
+  # subdirectory part like word/diagrams (target "../media/...") must not be
+  # deleted by sanitize_images(), which only scans the parts officer manages.
+  src <- build_unmanaged_media_docx()
+
+  out <- tempfile(fileext = ".docx")
+  print(read_docx(src), target = out)
+  dir_out <- tempfile()
+  unzip(out, exdir = dir_out)
+
+  # both media files must still be present
+  expect_true(file.exists(file.path(dir_out, "word", "media", "image9.jpg")))
+  expect_true(file.exists(file.path(dir_out, "word", "media", "my image10.gif")))
+
+  # both unmanaged .rels files must still reference them
+  endnotes_rels <- readLines(
+    file.path(dir_out, "word", "_rels", "endnotes.xml.rels"), warn = FALSE
+  )
+  expect_true(any(grepl("image9.jpg", endnotes_rels, fixed = TRUE)))
+
+  diagram_rels <- readLines(
+    file.path(dir_out, "word", "diagrams", "_rels", "data1.xml.rels"),
+    warn = FALSE
+  )
+  # the unmanaged rels file is copied verbatim, so the URI-encoded target is
+  # preserved as written.
+  expect_true(any(grepl("my%20image10.gif", diagram_rels, fixed = TRUE)))
+
+  # the saved file must still be readable
+  expect_no_error(read_docx(out))
+})
