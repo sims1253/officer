@@ -139,9 +139,26 @@ update_docx_settings_from_file <- function(x, file) {
 
   node_evenodd_headers <- xml_child(node_doc, "w:evenAndOddHeaders")
   if (!inherits(node_evenodd_headers, "xml_missing")) {
-    x$even_and_odd_headers <- TRUE
+    # OOXML on/off element semantics: a present element is TRUE unless its
+    # w:val attribute is explicitly "0", "false" or "off"; a missing w:val
+    # on a present element means TRUE.
+    val <- xml_attr(node_evenodd_headers, "val")
+    x$even_and_odd_headers <- is.na(val) || !val %in% c("0", "false", "off")
   } else {
     x$even_and_odd_headers <- FALSE
+  }
+
+  # compatibility mode: read from <w:compat>/<w:compatSetting name="..."> to
+  # keep the reader symmetric with the writer (which only updates this entry).
+  node_compat <- xml_child(node_doc, "w:compat")
+  if (!inherits(node_compat, "xml_missing")) {
+    node_cm <- xml_find_first(
+      node_compat,
+      "w:compatSetting[@w:name='compatibilityMode']"
+    )
+    if (!inherits(node_cm, "xml_missing")) {
+      x$compatibility_mode <- xml_attr(node_cm, "val")
+    }
   }
 
   x
@@ -202,26 +219,56 @@ write_docx_settings <- function(x) {
     xml_remove(node)
   }
 
-  # evenAndOddHeaders
-  eoh_val <- if (settings$even_and_odd_headers) "1" else "0"
-  upsert_simple(doc, "w:evenAndOddHeaders", "val", eoh_val)
+  # evenAndOddHeaders: mirror the autoHyphenation add/remove pattern. An
+  # absent element stays absent across roundtrips; a present element with no
+  # w:val (TRUE) is never rewritten with w:val="0" or w:val="1".
+  node <- xml_child(doc, "w:evenAndOddHeaders")
+  if (settings$even_and_odd_headers && inherits(node, "xml_missing")) {
+    new_xml <- sprintf(
+      "<w:evenAndOddHeaders xmlns:w=\"%s\"/>",
+      ns
+    )
+    xml_add_child(doc, read_xml(new_xml))
+  } else if (!settings$even_and_odd_headers && !inherits(node, "xml_missing")) {
+    xml_remove(node)
+  }
 
-  # compat / compatSetting
+  # compat / compatSetting: when <w:compat> exists, preserve it and only
+  # update (or add) the compatibilityMode compatSetting, leaving every other
+  # compat entry untouched. When <w:compat> is missing entirely, add the
+  # block with just compatibilityMode.
   compat_node <- xml_child(doc, "w:compat")
-  compat_xml <- sprintf(
-    paste0(
-      "<w:compat xmlns:w=\"%s\">",
-      "<w:compatSetting w:name=\"compatibilityMode\"",
-      " w:uri=\"http://schemas.microsoft.com/office/word\"",
-      " w:val=\"%s\"/></w:compat>"
-    ),
-    ns,
-    settings$compatibility_mode
-  )
   if (inherits(compat_node, "xml_missing")) {
+    compat_xml <- sprintf(
+      paste0(
+        "<w:compat xmlns:w=\"%s\">",
+        "<w:compatSetting w:name=\"compatibilityMode\"",
+        " w:uri=\"http://schemas.microsoft.com/office/word\"",
+        " w:val=\"%s\"/></w:compat>"
+      ),
+      ns,
+      settings$compatibility_mode
+    )
     xml_add_child(doc, read_xml(compat_xml))
   } else {
-    xml_replace(compat_node, read_xml(compat_xml))
+    cm_node <- xml_find_first(
+      compat_node,
+      "w:compatSetting[@w:name='compatibilityMode']"
+    )
+    if (inherits(cm_node, "xml_missing")) {
+      cm_xml <- sprintf(
+        paste0(
+          "<w:compatSetting xmlns:w=\"%s\" w:name=\"compatibilityMode\"",
+          " w:uri=\"http://schemas.microsoft.com/office/word\"",
+          " w:val=\"%s\"/>"
+        ),
+        ns,
+        settings$compatibility_mode
+      )
+      xml_add_child(compat_node, read_xml(cm_xml))
+    } else {
+      xml_attr(cm_node, "w:val") <- settings$compatibility_mode
+    }
   }
 
   # embedTrueTypeFonts: add if TRUE, leave existing if not set

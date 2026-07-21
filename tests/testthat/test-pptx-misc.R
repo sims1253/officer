@@ -317,3 +317,121 @@ test_that("slide_visible", {
   x <- read_pptx(path)
   expect_equal(slide_visible(x), c(TRUE, FALSE, TRUE))
 })
+
+# sanitize_images (pptx branch): keep media referenced by any .rels, drop
+# orphan media (issue #730, round 5) ---------------------------------------
+test_that("pptx sanitize_images keeps referenced media and drops orphans", {
+  # build a minimal pptx that has slide1, then unzip it
+  base <- tempfile(fileext = ".pptx")
+  x0 <- read_pptx()
+  x0 <- add_slide(x0, "Title and Content", "Office Theme")
+  print(x0, target = base)
+  dir <- tempfile()
+  unzip(base, exdir = dir)
+
+  media_dir <- file.path(dir, "ppt", "media")
+  dir.create(media_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # used.gif: referenced from slide1.xml.rels -> must survive
+  writeBin(charToRaw("GIF89a"), file.path(media_dir, "used.gif"))
+  # used 2.gif: referenced from slide1.xml.rels via an encoded space
+  # ("../media/used%202.gif") -> must survive.
+  writeBin(charToRaw("GIF89a"), file.path(media_dir, "used 2.gif"))
+  # used3.gif: referenced from presentation.xml.rels (a part directly under
+  # ppt/) as "media/used3.gif" -> must survive.
+  writeBin(charToRaw("GIF89a"), file.path(media_dir, "used3.gif"))
+  # orphan.bmp: not referenced by any .rels -> must be deleted. Content is
+  # not validated, a small binary blob is enough (a plausible BMP header).
+  writeBin(
+    as.raw(c(0x42, 0x4d, 0x00, 0x00)),
+    file.path(media_dir, "orphan.bmp")
+  )
+
+  # register both image content types if not already present
+  ct_f <- file.path(dir, "[Content_Types].xml")
+  ct <- paste(readLines(ct_f, warn = FALSE), collapse = "\n")
+  if (!grepl('Extension="gif"', ct, fixed = TRUE)) {
+    ct <- sub("<Override",
+      '<Default Extension="gif" ContentType="image/gif"/><Override', ct)
+  }
+  if (!grepl('Extension="bmp"', ct, fixed = TRUE)) {
+    ct <- sub("<Override",
+      '<Default Extension="bmp" ContentType="image/bmp"/><Override', ct)
+  }
+  writeLines(ct, ct_f, useBytes = TRUE)
+
+  # reference used.gif and used%202.gif from slide1's rels (the slide XML
+  # need not display them; the pptx branch of sanitize_images keeps anything
+  # referenced by any .rels). Use fresh rIds to avoid colliding with the
+  # slideLayout rel.
+  s1rels_f <- file.path(dir, "ppt", "slides", "_rels", "slide1.xml.rels")
+  s1rels <- paste(readLines(s1rels_f, warn = FALSE), collapse = "\n")
+  existing <- regmatches(s1rels, gregexpr('Id="rId[0-9]+"', s1rels))[[1L]]
+  existing_nums <- as.integer(sub('Id="rId([0-9]+)"', '\\1', existing))
+  img_type <- "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+  new_rid <- sprintf("rId%d", max(existing_nums, 0L) + 1L)
+  new_rid2 <- sprintf("rId%d", max(existing_nums, 0L) + 2L)
+  s1rels <- sub("</Relationships>",
+    paste0(
+      '<Relationship Id="', new_rid,
+      '" Type="', img_type, '" Target="../media/used.gif"/>',
+      '<Relationship Id="', new_rid2,
+      '" Type="', img_type, '" Target="../media/used%202.gif"/>',
+      '</Relationships>'
+    ),
+    s1rels)
+  writeLines(s1rels, s1rels_f, useBytes = TRUE)
+
+  # reference used3.gif from presentation.xml.rels. presentation.xml lives
+  # directly under ppt/, so its rels file is ppt/_rels/presentation.xml.rels
+  # and its image target is relative to ppt/ ("media/used3.gif").
+  pres_rels_f <- file.path(dir, "ppt", "_rels", "presentation.xml.rels")
+  pres_rels <- paste(readLines(pres_rels_f, warn = FALSE), collapse = "\n")
+  existing_pres <- regmatches(pres_rels, gregexpr('Id="rId[0-9]+"', pres_rels))[[1L]]
+  existing_pres_nums <- as.integer(sub('Id="rId([0-9]+)"', '\\1', existing_pres))
+  new_rid3 <- sprintf("rId%d", max(existing_pres_nums, 0L) + 1L)
+  pres_rels <- sub("</Relationships>",
+    paste0(
+      '<Relationship Id="', new_rid3,
+      '" Type="', img_type, '" Target="media/used3.gif"/>',
+      '</Relationships>'
+    ),
+    pres_rels)
+  writeLines(pres_rels, pres_rels_f, useBytes = TRUE)
+
+  # re-zip
+  patched <- tempfile(fileext = ".pptx")
+  old_wd <- getwd()
+  setwd(dir)
+  on.exit(setwd(old_wd), add = TRUE)
+  zip::zip(
+    zipfile = patched,
+    files = list.files(dir, all.files = TRUE, no.. = TRUE),
+    root = dir
+  )
+  setwd(old_wd)
+
+  # read + print runs sanitize_images() (R/read_pptx.R:175) on the OUTPUT
+  # package, so assert on the printed file.
+  out <- tempfile(fileext = ".pptx")
+  print(read_pptx(patched), target = out)
+
+  dir_out <- tempfile()
+  unzip(out, exdir = dir_out)
+
+  # referenced media kept, orphan deleted
+  expect_true(file.exists(file.path(dir_out, "ppt", "media", "used.gif")))
+  expect_true(file.exists(file.path(dir_out, "ppt", "media", "used 2.gif")))
+  expect_true(file.exists(file.path(dir_out, "ppt", "media", "used3.gif")))
+  expect_false(file.exists(file.path(dir_out, "ppt", "media", "orphan.bmp")))
+
+  # the referenced image relationship survives in slide1's rels
+  rels_out <- paste(readLines(
+    file.path(dir_out, "ppt", "slides", "_rels", "slide1.xml.rels"),
+    warn = FALSE
+  ), collapse = "\n")
+  expect_true(grepl("used.gif", rels_out, fixed = TRUE))
+
+  # the saved file must still be readable
+  expect_no_error(read_pptx(out))
+})

@@ -285,3 +285,48 @@ officer_url_decode <- function(x) {
   Encoding(x) <- "UTF-8"
   x
 }
+
+# Decode URI percent-escapes (%XX) in a character vector. OPC relationship
+# targets are URI-encoded, so a target like "my%20image.gif" denotes the file
+# "my image.gif"; this turns the encoded form back into the on-disk name.
+#
+# Only valid %XX runs are decoded; a stray '%' not followed by two hex digits
+# (e.g. "50%off") is left untouched. Runs of consecutive escapes are decoded
+# to raw bytes and then read as UTF-8, so multi-byte sequences such as
+# %C3%A9 are handled. Decoding is done positionally (left to right) so a
+# produced byte never re-enters the scan (e.g. %25 -> '%' does not then turn
+# a following "41" into an 'A').
+.url_percent_decode <- function(x) {
+  run_re <- "(?:%[0-9A-Fa-f]{2})+"
+  vapply(x, function(s) {
+    m <- gregexpr(run_re, s, perl = TRUE)
+    pos <- as.integer(m[[1L]])
+    if (length(pos) == 1L && pos == -1L) {
+      return(s)
+    }
+    lens <- attr(m[[1L]], "match.length")
+    out <- character(length(pos) + 1L)
+    prev <- 1L
+    for (i in seq_along(pos)) {
+      run <- substring(s, pos[i], pos[i] + lens[i] - 1L)
+      hm <- gregexpr("%[0-9A-Fa-f]{2}", run, perl = TRUE)
+      hexs <- regmatches(run, hm)[[1L]]
+      bytes <- as.raw(strtoi(substring(hexs, 2L), base = 16L))
+      decoded <- if (any(bytes == 0x00)) {
+        # an embedded nul would error in rawToChar(); keep the run verbatim
+        run
+      } else {
+        ch <- rawToChar(bytes, multiple = FALSE)
+        Encoding(ch) <- "UTF-8"
+        ch
+      }
+      out[i] <- paste0(
+        substring(s, prev, pos[i] - 1L),
+        decoded
+      )
+      prev <- pos[i] + lens[i]
+    }
+    out[length(pos) + 1L] <- substring(s, prev)
+    paste0(out, collapse = "")
+  }, character(1L), USE.NAMES = FALSE)
+}
